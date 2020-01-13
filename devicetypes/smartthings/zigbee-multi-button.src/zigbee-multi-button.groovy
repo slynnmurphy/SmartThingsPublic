@@ -18,7 +18,7 @@ import groovy.json.JsonOutput
 import physicalgraph.zigbee.zcl.DataType
 
 metadata {
-	definition (name: "Zigbee Multi Button", namespace: "smartthings", author: "SmartThings", mnmn: "SmartThings", vid: "generic-4-button") {
+	definition (name: "Zigbee Multi Button", namespace: "smartthings", author: "SmartThings", mcdSync: true, ocfDeviceType: "x.com.st.d.remotecontroller") {
 		capability "Actuator"
 		capability "Battery"
 		capability "Button"
@@ -28,8 +28,9 @@ metadata {
 		capability "Sensor"
 		capability "Health Check"
 
-		//fingerprint inClusters: "0000, 0001, 0003, 0007, 0020, 0B05", outClusters: "0003, 0006, 0019", manufacturer: "CentraLite", model:"3450-L", deviceJoinName: "Iris KeyFob 1"
-		//fingerprint inClusters: "0000, 0001, 0003, 0007, 0020, 0B05", outClusters: "0003, 0006, 0019", manufacturer: "CentraLite", model:"3450-L2", deviceJoinName: "Iris KeyFob 1"
+		fingerprint inClusters: "0000, 0001, 0003, 0007, 0020, 0B05", outClusters: "0003, 0006, 0019", manufacturer: "CentraLite", model:"3450-L", deviceJoinName: "Iris KeyFob", mnmn: "SmartThings", vid: "generic-4-button"
+		fingerprint inClusters: "0000, 0001, 0003, 0007, 0020, 0B05", outClusters: "0003, 0006, 0019", manufacturer: "CentraLite", model:"3450-L2", deviceJoinName: "Iris KeyFob", mnmn: "SmartThings", vid: "generic-4-button"
+		fingerprint profileId: "0104", inClusters: "0004", outClusters: "0000, 0001, 0003, 0004, 0005, 0B05", manufacturer: "HEIMAN", model: "SceneSwitch-EM-3.0", deviceJoinName: "HEIMAN Scene Keypad", vid: "generic-4-button-alt"
 	}
 
 	tiles {
@@ -53,7 +54,7 @@ metadata {
 def parse(String description) {
 	def map = zigbee.getEvent(description)
 	def result = map ? map : parseAttrMessage(description)
-	if(result.name == "switch") {
+	if (result.name == "switch") {
 		result = createEvent(descriptionText: "Wake up event came in", isStateChange: true)
 	}
 	log.debug "Description ${description} parsed to ${result}"
@@ -67,7 +68,18 @@ def parseAttrMessage(description) {
 		map = getBatteryPercentageResult(Integer.parseInt(descMap.value, 16))
 	} else if (descMap?.clusterInt == zigbee.ONOFF_CLUSTER && descMap.isClusterSpecific) {
 		map = getButtonEvent(descMap)
-	}
+	} else if(descMap?.clusterInt == 0xFC80) {
+		def buttonNumber
+		buttonNumber = Integer.valueOf(descMap?.command[1].toInteger()) + 1
+       
+		log.debug "Number is ${buttonNumber}"
+		def event = createEvent(name: "button", value: "pushed", data: [buttonNumber: buttonNumber], descriptionText: "pushed", isStateChange: true)
+		if (buttonNumber != 1) {
+			sendEventToChild(buttonNumber, event)
+		} else {
+			sendEvent(event)
+		}
+   	}
 	map
 }
 
@@ -91,12 +103,8 @@ def getButtonResult(buttonState, buttonNumber = 1) {
 			buttonState = timeDiff < holdTime ? "pushed" : "held"
 			def descriptionText = (device.displayName.endsWith(' 1') ? "${device.displayName[0..-2]} button" : "${device.displayName}") + " ${buttonNumber} was ${buttonState}"
 			event = createEvent(name: "button", value: buttonState, data: [buttonNumber: buttonNumber], descriptionText: descriptionText, isStateChange: true)
-			if(buttonNumber != 1) {
-				sendEventToChild(buttonNumber, event)
-				return createEvent(descriptionText: descriptionText)
-			} else {
-				return event
-			}
+			sendEventToChild(buttonNumber, event)
+			return createEvent(descriptionText: descriptionText)
 		}
 	} else if (buttonState == 'press') {
 		state.pressTime = now()
@@ -148,8 +156,10 @@ def configure() {
 }
 
 def installed() {
-	runIn(2, "initialize", [overwrite: true])
-	sendEvent(name: "button", value: "pushed", isStateChange: true)
+	sendEvent(name: "button", value: "pushed", isStateChange: true, displayed: false)
+	sendEvent(name: "supportedButtonValues", value: supportedButtonValues.encodeAsJSON(), displayed: false)
+	
+	initialize()
 }
 
 def updated() {
@@ -160,12 +170,13 @@ def initialize() {
 	def numberOfButtons = modelNumberOfButtons[device.getDataValue("model")]
 	sendEvent(name: "numberOfButtons", value: numberOfButtons, displayed: false)
 	sendEvent(name: "checkInterval", value: 2 * 60 * 60 + 2 * 60, displayed: false, data: [protocol: "zigbee", hubHardwareId: device.hub.hardwareID])
+    
 	if(!childDevices) {
 		addChildButtons(numberOfButtons)
 	}
 	if(childDevices) {
 		def event
-		for(def endpoint : 2..device.currentValue("numberOfButtons")) {
+		for(def endpoint : 1..device.currentValue("numberOfButtons")) {
 			event = createEvent(name: "button", value: "pushed", isStateChange: true)
 			sendEventToChild(endpoint, event)
 		}
@@ -173,17 +184,18 @@ def initialize() {
 }
 
 private addChildButtons(numberOfButtons) {
-	for(def endpoint : 2..numberOfButtons) {
+	for(def endpoint : 1..numberOfButtons) {
 		try {
 			String childDni = "${device.deviceNetworkId}:$endpoint"
 			def componentLabel = (device.displayName.endsWith(' 1') ? device.displayName[0..-2] : device.displayName) + "${endpoint}"
-			addChildDevice("Child Button", childDni, device.getHub().getId(), [
+			def child = addChildDevice("Child Button", childDni, device.getHub().getId(), [
 					completedSetup: true,
 					label         : componentLabel,
 					isComponent   : true,
 					componentName : "button$endpoint",
 					componentLabel: "Button $endpoint"
 			])
+			child.sendEvent(name: "supportedButtonValues", value: supportedButtonValues.encodeAsJSON(), displayed: false)
 		} catch(Exception e) {
 			log.debug "Exception: ${e}"
 		}
@@ -207,10 +219,23 @@ private getButtonMap() {[
 				"04" : 2
 		]
 ]}
+
+private getSupportedButtonValues() {
+	def values
+	if (device.getDataValue("model") == "SceneSwitch-EM-3.0") {
+		values = ["pushed"]
+	} else {
+		values = ["pushed", "held"]
+	}
+	return values
+}
+
 private getModelNumberOfButtons() {[
 		"3450-L" : 4,
-		"3450-L2" : 4
+		"3450-L2" : 4,
+		"SceneSwitch-EM-3.0" : 4
 ]}
+
 private getModelBindings(model) {
 	def bindings = []
 	for(def endpoint : 1..modelNumberOfButtons[model]) {
